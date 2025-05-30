@@ -1,0 +1,199 @@
+import os
+import logging
+import requests
+import asyncio
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command, CommandStart
+from aiogram.types import BotCommand, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramAPIError
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+from dotenv import load_dotenv
+load_dotenv()
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+HF_TOKEN = os.getenv("HF_TOKEN")
+HF_MODEL = "HuggingFaceH4/zephyr-7b-beta"
+HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
+
+def ask_huggingface(prompt: str) -> str:
+    if not prompt or not prompt.strip():
+        return "Вопрос пустой. Задайте корректный вопрос."
+    
+    headers = {
+        "Authorization": f"Bearer {HF_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    prompt = f"Ответы пиши на русском языке. {prompt}"
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "max_new_tokens": 150,
+            "return_full_text": False
+        }
+    }
+    try:
+        response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=10)
+        if response.status_code != 200:
+            logger.error(f"Ошибка API HuggingFace: {response.status_code} - {response.text}")
+            return "Ошибка запроса к HuggingFace 😔"
+        
+        data = response.json()
+        if isinstance(data, dict) and "error" in data:
+            logger.error(f"Ошибка HuggingFace: {data['error']}")
+            return f"Ошибка: {data['error']}"
+        
+        if not data or not isinstance(data, list) or not data[0].get("generated_text"):
+            logger.error("HuggingFace вернул пустой или некорректный ответ")
+            return "Не удалось получить ответ от модели."
+        
+        return data[0]["generated_text"].strip()
+    except Exception as e:
+        logger.error(f"Ошибка в ask_huggingface: {e}")
+        return "Не удалось получить ответ от модели."
+
+def get_main_keyboard():
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Помощь", callback_data="help"),
+            InlineKeyboardButton(text="Квадрат числа", callback_data="square")
+        ],
+        [InlineKeyboardButton(text="Спросить ИИ", callback_data="ask")]
+    ])
+    return keyboard
+
+@dp.message(CommandStart())
+async def start(message: types.Message):
+    try:
+        user = message.from_user
+        logger.info(f"Пользователь {user.id} запустил бот")
+        welcome_text = "Привет! Я Бот Калинин Матвей с нейросетью!. Используй кнопки ниже или команды: /help"
+        await message.reply(welcome_text, reply_markup=get_main_keyboard())
+    except TelegramAPIError as e:
+        logger.error(f"Ошибка в /start: {e}")
+        await message.reply("Произошла ошибка. Попробуйте позже.")
+
+@dp.message(Command("help"))
+async def help_command(message: types.Message):
+    try:
+        help_text = (
+            "/start – Приветствие\n"
+            "/help – Все команды\n"
+            "/square [число] – Квадрат числа\n"
+            "/ask [вопрос] – Спросить у ИИ\n"
+            "Можно также отправить число или текст для ИИ"
+        )
+        await message.reply(help_text, reply_markup=get_main_keyboard())
+    except TelegramAPIError as e:
+        logger.error(f"Ошибка в /help: {e}")
+        await message.reply("Произошла ошибка. Попробуйте позже.")
+
+@dp.message(Command("square"))
+async def square(message: types.Message):
+    try:
+        args = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else None
+        if not args:
+            await message.reply("Нужно ввести число, например: /square 5")
+            return
+        num = float(args)
+        await message.reply(f"{num} в квадрате = {num ** 2}")
+    except (ValueError, IndexError):
+        await message.reply("Нужно ввести число, например: /square 5")
+    except TelegramAPIError as e:
+        logger.error(f"Ошибка в /square: {e}")
+        await message.reply("Произошла ошибка. Попробуйте позже.")
+
+@dp.message(Command("ask"))
+async def ask_nlp(message: types.Message):
+    try:
+        args = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else None
+        if not args:
+            await message.reply("Нужно задать вопрос, например: /ask Что такое ИИ?")
+            return
+        if len(args) > 1000:
+            await message.reply("Вопрос слишком длинный! Максимум 1000 символов.")
+            return
+        await message.reply("<i>Думаю...</i>")
+        response = ask_huggingface(args)
+        if response:
+            await message.reply(response[:4096])
+        else:
+            await message.reply("Не удалось получить ответ от модели.")
+    except TelegramAPIError as e:
+        logger.error(f"Ошибка в /ask: {e}")
+        await message.reply("Произошла ошибка при обращении к ИИ. Попробуйте позже.")
+
+@dp.message()
+async def handle_message(message: types.Message):
+    try:
+        user_input = message.text
+        if user_input.startswith('/'):
+            return
+        try:
+            num = float(user_input)
+            await message.reply(f"{num} в квадрате = {num ** 2}")
+        except ValueError:
+            await message.reply("<i>Думаю...</i>")
+            response = ask_huggingface(user_input)
+            if response:
+                await message.reply(response[:4096])
+            else:
+                await message.reply("Не удалось получить ответ от модели.")
+    except TelegramAPIError as e:
+        logger.error(f"Ошибка в handle_message: {e}")
+        await message.reply("Произошла ошибка. Попробуйте позже.")
+
+@dp.callback_query()
+async def handle_callback(callback: types.CallbackQuery):
+    try:
+        if callback.data == "help":
+            await callback.message.reply(
+                "/start – Приветствие\n"
+                "/help – Все команды\n"
+                "/square [число] – Квадрат числа\n"
+                "/ask [вопрос] – Спросить у ИИ\n"
+                "Можно также отправить число или текст для ИИ",
+                reply_markup=get_main_keyboard()
+            )
+        elif callback.data == "square":
+            await callback.message.reply("Введите число, например: /square 5")
+        elif callback.data == "ask":
+            await callback.message.reply("Задайте вопрос ИИ, например: /ask Что такое ИИ?")
+        await callback.answer()
+    except TelegramAPIError as e:
+        logger.error(f"Ошибка в callback: {e}")
+        await callback.message.reply("Произошла ошибка. Попробуйте позже.")
+
+async def set_bot_commands(bot: Bot):
+    commands = [
+        BotCommand(command="start", description="Приветствие"),
+        BotCommand(command="help", description="Все команды"),
+        BotCommand(command="square", description="Квадрат числа"),
+        BotCommand(command="ask", description="Спросить у ИИ")
+    ]
+    try:
+        await bot.set_my_commands(commands)
+        logger.info("Команды бота успешно установлены")
+    except TelegramAPIError as e:
+        logger.error(f"Ошибка установки команд: {e}")
+
+async def main():
+    try:
+        await set_bot_commands(bot)
+        logger.info("Запуск бота...")
+        await dp.start_polling(bot)
+    except KeyboardInterrupt:
+        logger.info("Остановка бота...")
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка: {e}")
+    finally:
+        await bot.session.close()
+        logger.info("Сессия бота закрыта")
+
+if __name__ == '__main__':
+    asyncio.run(main())
