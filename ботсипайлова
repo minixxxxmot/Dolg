@@ -1,0 +1,198 @@
+import os
+import logging
+import asyncio
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command, CommandStart
+from aiogram.types import BotCommand, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramAPIError
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+from dotenv import load_dotenv
+from deep_translator import GoogleTranslator
+
+# Загрузка переменных окружения
+load_dotenv()
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+# Конфигурация бота
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
+
+# Инициализация переводчика
+translator = GoogleTranslator(source='auto', target='en')
+
+# Хранилище для текста, ожидающего перевода
+pending_translations = {}
+
+# Функция для перевода текста
+def translate_text(text: str, dest_lang: str = 'en') -> str:
+    try:
+        if not text or not text.strip():
+            return "Текст для перевода пустой."
+        translated = GoogleTranslator(source='auto', target=dest_lang).translate(text)
+        if not translated:
+            return "Не удалось перевести текст."
+        return translated.strip()
+    except Exception as e:
+        logger.error(f"Ошибка перевода: {e}")
+        return "Не удалось перевести текст."
+
+# Inline-клавиатура для выбора языка
+def get_language_keyboard():
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Английский", callback_data="lang:en"),
+            InlineKeyboardButton(text="Русский", callback_data="lang:ru")
+        ],
+        [
+            InlineKeyboardButton(text="Немецкий", callback_data="lang:de"),
+            InlineKeyboardButton(text="Испанский", callback_data="lang:es")
+        ]
+    ])
+    return keyboard
+
+# Inline-клавиатура основного меню
+def get_main_keyboard():
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Помощь", callback_data="help"),
+            InlineKeyboardButton(text="Квадрат числа", callback_data="square")
+        ],
+        [InlineKeyboardButton(text="Перевести текст", callback_data="translate")]
+    ])
+    return keyboard
+
+@dp.message(CommandStart())
+async def start(message: types.Message):
+    try:
+        logger.info(f"Пользователь {message.from_user.id} запустил бот")
+        await message.reply("Привет! Я бот-переводчик. Отправь текст или число, или используй /help.", reply_markup=get_main_keyboard())
+    except TelegramAPIError as e:
+        logger.error(f"Ошибка в /start: {e}")
+        await message.reply("Произошла ошибка.")
+
+@dp.message(Command("help"))
+async def help_command(message: types.Message):
+    try:
+        help_text = (
+            "/start – Приветствие\n"
+            "/help – Команды\n"
+            "/square [число] – Квадрат числа\n"
+            "/translate [текст] – Перевод текста (выбери язык через кнопки)"
+        )
+        await message.reply(help_text, reply_markup=get_main_keyboard())
+    except TelegramAPIError as e:
+        logger.error(f"Ошибка в /help: {e}")
+        await message.reply("Произошла ошибка.")
+
+@dp.message(Command("square"))
+async def square(message: types.Message):
+    try:
+        args = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else None
+        if not args:
+            await message.reply("Нужно ввести число, например: /square 5")
+            return
+        num = float(args)
+        await message.reply(f"{num} в квадрате = {num ** 2}")
+    except (ValueError, IndexError):
+        await message.reply("Нужно ввести число, например: /square 5")
+    except TelegramAPIError as e:
+        logger.error(f"Ошибка в /square: {e}")
+        await message.reply("Произошла ошибка.")
+
+@dp.message(Command("translate"))
+async def translate_command(message: types.Message):
+    try:
+        args = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else None
+        if not args:
+            await message.reply("Нужно ввести текст, например: /translate Привет, мир!")
+            return
+        if len(args) > 1000:
+            await message.reply("Текст слишком длинный! Максимум 1000 символов.")
+            return
+        user_id = message.from_user.id
+        pending_translations[user_id] = args
+        await message.reply("Выбери язык для перевода:", reply_markup=get_language_keyboard())
+    except TelegramAPIError as e:
+        logger.error(f"Ошибка в /translate: {e}")
+        await message.reply("Произошла ошибка.")
+
+@dp.message()
+async def handle_message(message: types.Message):
+    try:
+        user_input = message.text
+        if user_input.startswith('/'):
+            return
+        try:
+            num = float(user_input)
+            await message.reply(f"{num} в квадрате = {num ** 2}")
+        except ValueError:
+            user_id = message.from_user.id
+            pending_translations[user_id] = user_input
+            await message.reply("Выбери язык для перевода:", reply_markup=get_language_keyboard())
+    except TelegramAPIError as e:
+        logger.error(f"Ошибка в handle_message: {e}")
+        await message.reply("Произошла ошибка.")
+
+@dp.callback_query()
+async def handle_callback(callback: types.CallbackQuery):
+    try:
+        if callback.data == "help":
+            await callback.message.reply(
+                "/start – Приветствие\n"
+                "/help – Команды\n"
+                "/square [число] – Квадрат числа\n"
+                "/translate [текст] – Перевод текста (выбери язык через кнопки)",
+                reply_markup=get_main_keyboard()
+            )
+        elif callback.data == "square":
+            await callback.message.reply("Введите число, например: /square 5")
+        elif callback.data == "translate":
+            await callback.message.reply("Введите текст, например: /translate Привет, мир!")
+        elif callback.data.startswith("lang:"):
+            user_id = callback.from_user.id
+            if user_id not in pending_translations:
+                await callback.message.reply("Сначала отправь текст для перевода!")
+                await callback.answer()
+                return
+            dest_lang = callback.data.split(":")[1]
+            text = pending_translations.pop(user_id, None)
+            response = translate_text(text, dest_lang)
+            await callback.message.reply(response[:4096])
+        await callback.answer()
+    except TelegramAPIError as e:
+        logger.error(f"Ошибка в callback: {e}")
+        await callback.message.reply("Произошла ошибка.")
+
+async def set_bot_commands(bot: Bot):
+    commands = [
+        BotCommand(command="start", description="Приветствие"),
+        BotCommand(command="help", description="Команды"),
+        BotCommand(command="square", description="Квадрат числа"),
+        BotCommand(command="translate", description="Перевести текст")
+    ]
+    try:
+        await bot.set_my_commands(commands)
+        logger.info("Команды бота установлены")
+    except TelegramAPIError as e:
+        logger.error(f"Ошибка установки команд: {e}")
+
+async def main():
+    try:
+        await set_bot_commands(bot)
+        logger.info("Запуск бота...")
+        await dp.start_polling(bot)
+    except KeyboardInterrupt:
+        logger.info("Остановка бота...")
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка: {e}")
+    finally:
+        await bot.session.close()
+        logger.info("Сессия бота закрыта")
+
+if __name__ == '__main__':
+    asyncio.run(main())
